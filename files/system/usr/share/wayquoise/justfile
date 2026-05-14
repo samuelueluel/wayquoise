@@ -1,0 +1,385 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+HOME      := env_var("HOME")
+SHARE     := "/usr/share/wayquoise"
+ZSH_PLUGS := HOME + "/.local/share/zsh/plugins"
+ZEN_DIR   := HOME + "/.config/zen"
+
+# List available recipes
+default:
+    @just --justfile /usr/share/wayquoise/justfile --list --unsorted
+
+# Full setup — run everything in order
+setup: dirs zen chezmoi zen-extensions brew pipx flatpaks system
+    update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
+    gtk-update-icon-cache -f -t /usr/share/icons/oreo_spark_orange_cursors 2>/dev/null || true
+    gtk-update-icon-cache -f -t /usr/share/icons/Papirus 2>/dev/null || true
+    # Restart Waybar so it picks up the correct GTK icon theme + custom .desktop files
+    pkill -u "$USER" waybar 2>/dev/null || true
+    sleep 0.5
+    waybar &>/dev/null & disown $!
+    @echo ""
+    @echo "Done. Manual steps remaining:"
+    @echo "  - Log out and back in for group changes to take effect"
+    @echo "  - Dropbox: sign in"
+    @echo "  - EasyEffects: open app to confirm presets loaded"
+
+# Pre-create required directories
+dirs:
+    mkdir -p \
+        {{HOME}}/.local/bin \
+        {{HOME}}/.local/share/applications \
+        {{HOME}}/.local/share/zsh/plugins \
+        {{HOME}}/.config \
+        {{HOME}}/.gnome2/accels \
+        {{HOME}}/.ssh \
+        {{HOME}}/.npm-global/bin
+    chmod 700 {{HOME}}/.ssh
+
+# Register Zen profiles, create .desktop launchers, set zen-utility as default browser (optional; before chezmoi)
+zen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v zen-browser &>/dev/null || { echo "Zen Browser not found, skipping."; exit 0; }
+
+    # Create profile directories
+    mkdir -p "{{ZEN_DIR}}/zen.personal" "{{ZEN_DIR}}/zen.utility" "{{ZEN_DIR}}/zen.work"
+
+    # Write profiles.ini and installs.ini — the Install block and installs.ini
+    # ensure that Zen doesn't create a new hashed profile on rebase/update.
+    # The hash 544180EF0598BAEE is specific to the /usr/bin/zen-browser path.
+    printf '%s\n' '[General]' 'StartWithLastProfile=1' 'Version=2' '' \
+        '[Profile0]' 'Name=personal' 'IsRelative=1' 'Path=zen.personal' 'Default=1' '' \
+        '[Profile1]' 'Name=utility' 'IsRelative=1' 'Path=zen.utility' '' \
+        '[Profile2]' 'Name=work' 'IsRelative=1' 'Path=zen.work' '' \
+        '[Install544180EF0598BAEE]' 'Default=zen.personal' \
+        > "{{ZEN_DIR}}/profiles.ini"
+
+    printf '%s\n' '[544180EF0598BAEE]' 'Default=zen.personal' > "{{ZEN_DIR}}/installs.ini"
+
+    declare -A ICONS=( ["personal"]="/usr/share/icons/Papirus/48x48/apps/a7xpg.svg" ["utility"]="/usr/share/icons/Papirus/48x48/apps/braindump.svg" ["work"]="/usr/share/icons/Papirus/48x48/apps/applications-office.svg" )
+    declare -A NAMES=( ["personal"]="Personal" ["utility"]="Utility" ["work"]="Work" )
+    for profile in personal utility work; do
+        CAP="${NAMES[$profile]}"
+        NAME="Zen ($CAP)"
+        ICON="${ICONS[$profile]}"
+        FILE="{{HOME}}/.local/share/applications/zen-${profile}.desktop"
+        cat > "$FILE" <<EOF
+    [Desktop Entry]
+    Name=$NAME
+    Comment=Launch Zen Browser with the $CAP profile
+    Exec=env MOZ_APP_REMOTINGNAME=zen-$profile zen-browser -P "$profile" %u
+    Icon=$ICON
+    Terminal=false
+    Type=Application
+    Categories=Network;WebBrowser;
+    StartupWMClass=zen-$profile
+    MimeType=x-scheme-handler/unknown;x-scheme-handler/about;x-scheme-handler/https;x-scheme-handler/http;text/html;
+    EOF
+        chmod +x "$FILE"
+    done
+
+    xdg-settings set default-web-browser zen-utility.desktop 2>/dev/null || true
+    for mime in x-scheme-handler/http x-scheme-handler/https text/html \
+                application/xhtml+xml application/x-extension-html \
+                application/x-extension-shtml application/x-extension-xhtml \
+                x-scheme-handler/about x-scheme-handler/unknown; do
+        xdg-mime default zen-utility.desktop "$mime" 2>/dev/null || true
+    done
+
+# Deploy dotfiles from image snapshot, init chezmoi, apply (before brew)
+chezmoi:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! -d "$HOME/dotfiles/.git" ]]; then
+        echo "Populating ~/dotfiles from image snapshot..."
+        rsync -a {{SHARE}}/dotfiles/ "$HOME/dotfiles/"
+    fi
+    chezmoi init --source="$HOME/dotfiles"
+    chezmoi apply --force
+    systemctl --user enable empty-trash.service || true
+    gsettings set org.gnome.desktop.interface icon-theme Papirus
+    gsettings set org.gnome.desktop.interface cursor-theme oreo_spark_orange_cursors
+    systemctl --user restart xdg-desktop-portal-gtk.service 2>/dev/null || true
+    systemctl --user restart xdg-desktop-portal.service 2>/dev/null || true
+
+# Install Zen Browser extensions into each profile (optional; after chezmoi)
+zen-extensions:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v zen-browser &>/dev/null || { echo "Zen Browser not found, skipping."; exit 0; }
+
+    PERSONAL="{{ZEN_DIR}}/zen.personal"
+    UTILITY="{{ZEN_DIR}}/zen.utility"
+    WORK="{{ZEN_DIR}}/zen.work"
+    CUSTOM="{{HOME}}/dotfiles/zen-extensions"
+
+    amo() {
+        local dir="$1" slug="$2" id="$3"
+        mkdir -p "$dir/extensions"
+        echo "  [amo] $slug"
+        curl -sL "https://addons.mozilla.org/firefox/downloads/latest/$slug/" -o "$dir/extensions/$id"
+    }
+
+    custom() {
+        local dir="$1" src="$2" id="$3"
+        mkdir -p "$dir/extensions"
+        echo "  [custom] $src"
+        cp "{{HOME}}/dotfiles/zen-extensions/$src" "$dir/extensions/$id"
+    }
+
+    echo "Installing Zen extensions..."
+
+    for PROFILE in "$PERSONAL" "$UTILITY" "$WORK"; do
+        [[ -d "$PROFILE" ]] || continue
+        amo    "$PROFILE" "ublock-origin"               "uBlock0@raymondhill.net.xpi"
+        amo    "$PROFILE" "bitwarden-password-manager"  "{446900e4-71c2-419f-a6a7-df9c091e268b}.xpi"
+        amo    "$PROFILE" "blocktube"                   "{58204f8b-01c2-4bbc-98f8-9a90458fd9ef}.xpi"
+        amo    "$PROFILE" "auto-tab-discard"            "{c2c003ee-bd69-42a2-b0e9-6f34222cb046}.xpi"
+        amo    "$PROFILE" "chrome-mask"                 "chrome-mask@overengineer.dev.xpi"
+        amo    "$PROFILE" "sponsorblock"                "sponsorBlocker@ajay.app.xpi"
+        custom "$PROFILE" "alt-tab-tabs.xpi"            "alt-tab-tabs@samuel.local.xpi"
+        custom "$PROFILE" "tab-cycle.xpi"               "tab-cycle@samuel.local.xpi"
+    done
+
+    # Personal only
+    amo "$PERSONAL" "reddit-enhancement-suite"  "jid1-xUfzOsOFlzSOXg@jetpack.xpi"
+    amo "$PERSONAL" "tampermonkey"              "firefox@tampermonkey.net.xpi"
+
+    # Utility only
+    amo "$UTILITY" "reddit-enhancement-suite"  "jid1-xUfzOsOFlzSOXg@jetpack.xpi"
+
+    echo "Done."
+
+# Fix Homebrew, install packages from ~/.Brewfile, install rtk and bbrew
+brew:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sudo rm -f /etc/.linuxbrew
+    sudo systemctl start brew-setup.service || true
+    sudo chown -R "$(whoami):wheel" /home/linuxbrew
+    sudo chmod -R g+rwX /home/linuxbrew
+    eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+    brew bundle --global
+    brew install gcc make
+    brew install rtk
+    rtk init -g --auto-patch || true
+    rtk init -g --gemini --auto-patch || true
+    BBREW_VERSION=$(curl -fsSL https://api.github.com/repos/Valkyrie00/bold-brew/releases/latest \
+        | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+    BBREW_TMP=$(mktemp -d)
+    curl -L "https://github.com/Valkyrie00/bold-brew/releases/download/v${BBREW_VERSION}/bbrew_${BBREW_VERSION}_linux_amd64.tar.gz" \
+        | tar -xz -C "$BBREW_TMP" \
+        && mv "$BBREW_TMP/bbrew" "$(brew --prefix)/bin/bbrew"
+    rm -rf "$BBREW_TMP"
+
+# Declaratively install/upgrade Python-based CLI tools from ~/.Pipxfile
+pipx:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PIPX_FILE="{{HOME}}/.Pipxfile"
+    [[ -f "$PIPX_FILE" ]] || { echo "~/.Pipxfile not found, skipping."; exit 0; }
+    echo "Syncing pipx packages from $PIPX_FILE..."
+    while IFS= read -r pkg || [[ -n "$pkg" ]]; do
+        [[ "$pkg" =~ ^#.* ]] || [[ -z "$pkg" ]] && continue
+        # Strip comments and whitespace
+        pkg_name=$(echo "$pkg" | cut -d'#' -f1 | xargs)
+        # Extract base package name for 'pipx list' check (removes [extra])
+        base_name=$(echo "$pkg_name" | sed 's/\[.*//')
+        if pipx list --short | grep -q "^${base_name} "; then
+             echo "  Upgrading $pkg_name..."
+             pipx upgrade "$pkg_name" &>/dev/null || true
+        else
+             echo "  Installing $pkg_name..."
+             pipx install "$pkg_name"
+        fi
+    done < "$PIPX_FILE"
+
+# Add Flathub, install flatpaks, apply permission overrides
+flatpaks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    flatpak remote-add --if-not-exists --system flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    flatpak install --system --noninteractive flathub \
+        org.kde.KStyle.Kvantum//6.10 \
+        md.obsidian.Obsidian \
+        com.bitwarden.desktop \
+        org.kde.okular \
+        org.libreoffice.LibreOffice \
+        org.gnome.meld \
+        org.texstudio.TeXstudio \
+        com.github.wwmm.easyeffects \
+        io.github.quodlibet.QuodLibet \
+        org.qgis.qgis//stable \
+        org.nicotine_plus.Nicotine \
+        com.stremio.Stremio \
+        io.missioncenter.MissionCenter \
+        io.github.dvlv.boxbuddyrs \
+        com.github.tchx84.Flatseal \
+        io.github.flattool.Warehouse \
+        io.github.kolunmi.Bazaar \
+        org.fedoraproject.MediaWriter \
+        com.github.PintaProject.Pinta
+    flatpak override --user --filesystem=xdg-config/gtk-3.0:ro io.github.quodlibet.QuodLibet || true
+    flatpak override --user --env=QT_QPA_PLATFORMTHEME=qt6ct --filesystem=xdg-config/qt6ct:ro --filesystem=xdg-data/color-schemes:ro org.kde.okular || true
+
+# Add user to all required groups and set zsh as default shell
+system:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ME="$(whoami)"
+
+    add_group() {
+        local grp="$1"
+        getent group "$grp" &>/dev/null || { echo "  skipping $grp (group not found)"; return; }
+        groups "$ME" | grep -qw "$grp" && return
+        sudo usermod -aG "$grp" "$ME"
+        echo "  added to $grp"
+    }
+
+    echo "Configuring group memberships..."
+    for grp in wheel libvirt kvm lp optical storage video input i2c systemd-journal; do
+        add_group "$grp"
+    done
+
+    ZSH_PATH="$(command -v zsh)"
+    [[ "$SHELL" == "$ZSH_PATH" ]] || sudo usermod -s "$ZSH_PATH" "$ME"
+
+# Replace default zRAM with a 16GB swap file on /var (optional; not in setup)
+swap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if swapon --show | grep -q '/var/swapfile'; then
+        echo "Swap file already active, nothing to do."
+        exit 0
+    fi
+    sudo touch /etc/systemd/zram-generator.conf
+    sudo swapoff /dev/zram0 2>/dev/null || true
+    sudo fallocate -l 16G /var/swapfile
+    sudo chmod 600 /var/swapfile
+    sudo mkswap /var/swapfile
+    sudo swapon /var/swapfile
+    grep -q '/var/swapfile' /etc/fstab || echo '/var/swapfile none swap defaults 0 0' | sudo tee -a /etc/fstab
+    swapon --show
+
+# Configure SSH agent socket and load personal key (requires ~/.ssh/id_ed25519; not in setup)
+ssh-setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! -f "$HOME/.ssh/id_ed25519" ]]; then
+        echo "No ~/.ssh/id_ed25519 found — this recipe is for Samuel's personal setup only."
+        exit 1
+    fi
+    systemctl --user enable --now ssh-agent.socket
+    export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+    SSH_ASKPASS_REQUIRE=never ssh-add ~/.ssh/id_ed25519
+    # Append auto-load snippet to ~/.zshrc if not already present
+    if ! grep -q 'ssh-add.*id_ed25519' "$HOME/.zshrc" 2>/dev/null; then
+        printf '\n# Auto-load SSH key on first terminal (added by sjust ssh-setup)\n[[ -S "$SSH_AUTH_SOCK" ]] && { ssh-add -l &>/dev/null || SSH_ASKPASS_REQUIRE=never ssh-add ~/.ssh/id_ed25519; }\n' >> "$HOME/.zshrc"
+        echo "Added ssh-add auto-load to ~/.zshrc."
+    fi
+    echo "SSH agent socket enabled and key loaded."
+
+# Set up Obsidian CLI wrapper — enables CLI toggle and verifies wrapper is deployed (not in setup)
+obsidian-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    OBSIDIAN_JSON="$HOME/.var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json"
+
+    flatpak info md.obsidian.Obsidian &>/dev/null || {
+        echo "Obsidian Flatpak not installed. Run 'sjust flatpaks' first."
+        exit 1
+    }
+
+    pgrep -f "md.obsidian.Obsidian" &>/dev/null && {
+        echo "Obsidian is running — close it first so the config change isn't overwritten."
+        exit 1
+    }
+
+    [[ -f "$OBSIDIAN_JSON" ]] || {
+        echo "obsidian.json not found at $OBSIDIAN_JSON — launch Obsidian at least once first."
+        exit 1
+    }
+
+    python3 -c "import json; fp='$OBSIDIAN_JSON'; data=json.load(open(fp)); data['cli']=True; json.dump(data, open(fp,'w')); print('CLI toggle enabled in obsidian.json')"
+
+    [[ -x "$HOME/.local/bin/obsidian" ]] \
+        && echo "Wrapper at ~/.local/bin/obsidian is in place." \
+        || echo "Warning: ~/.local/bin/obsidian not found — run 'sjust chezmoi' to deploy dotfiles first."
+
+    echo "Done. Launch Obsidian to activate the socket, then test with: obsidian files"
+
+# Configure Obsidian vault name and path (updates chezmoi data)
+obsidian-vault name path:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ABS_PATH=$(realpath -m "{{path}}")
+    DATA_FILE="{{HOME}}/dotfiles/.chezmoidata.yaml"
+    mkdir -p "$(dirname "$DATA_FILE")"
+    printf "obsidian:\n  vault_name: \"{{name}}\"\n  vault_path: \"$ABS_PATH\"\n" > "$DATA_FILE"
+    echo "Updated Obsidian vault configuration in $DATA_FILE"
+    echo "Vault Name: {{name}}"
+    echo "Vault Path: $ABS_PATH"
+    echo "Applying changes..."
+    chezmoi apply --force
+
+# System maintenance: health check, image upgrade, flatpaks, brew, distroboxes, firmware (not in setup)
+update:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo -e "\033[33mNOTE: uupd handles image, flatpaks, homebrew, and distroboxes automatically daily at 4am.\033[0m"
+    echo -e "\033[33mNOTE: Some packages built from source in image recipe are PINNED and won't update without manual intervention; others pull latest release without notification.\033[0m"
+
+    echo -e "\n\033[34m=== System Health Check ===\033[0m"
+    echo -e "\033[36m  \$ systemctl --failed\033[0m"
+    systemctl --failed || true
+
+    echo -e "\n\033[34m=== Empty Trash? ===\033[0m"
+    if command -v trash-empty >/dev/null; then
+        trash-empty
+    else
+        gio trash --empty || true
+    fi
+
+    echo -e "\n\033[34m=== Staging Image Update (bootc upgrade) ===\033[0m"
+    echo -e "\033[36m  \$ sudo bootc upgrade\033[0m"
+    sudo bootc upgrade
+
+    echo -e "\n\033[34m=== Updating Flatpaks ===\033[0m"
+    echo -e "\033[36m  \$ flatpak update -y\033[0m"
+    flatpak update -y || true
+
+    echo -e "\n\033[34m=== Removing Unused Flatpak Runtimes ===\033[0m"
+    echo -e "\033[36m  \$ flatpak uninstall --unused -y\033[0m"
+    flatpak uninstall --unused -y || true
+
+    echo -e "\n\033[34m=== Updating Distroboxes ===\033[0m"
+    if command -v distrobox >/dev/null; then
+        echo -e "\033[36m  \$ distrobox upgrade --all\033[0m"
+        distrobox upgrade --all || true
+    else
+        echo -e "\033[31m  Distrobox not found, skipping.\033[0m"
+    fi
+
+    echo -e "\n\033[34m=== Updating Homebrew and Packages ===\033[0m"
+    if command -v brew >/dev/null; then
+        sudo chown -R "$(whoami):wheel" /home/linuxbrew 2>/dev/null || true
+        sudo chmod -R g+rwX /home/linuxbrew 2>/dev/null || true
+        echo -e "\033[36m  \$ brew update && brew upgrade && brew cleanup\033[0m"
+        brew update && brew upgrade && brew cleanup
+    else
+        echo -e "\033[31m  Homebrew not found, skipping.\033[0m"
+    fi
+
+    echo -e "\n\033[34m=== Updating pipx Packages ===\033[0m"
+    if command -v pipx >/dev/null; then
+        sjust pipx
+    else
+        echo -e "\033[31m  pipx not found, skipping.\033[0m"
+    fi
+
+    echo -e "\n\033[34m=== Checking Firmware Updates ===\033[0m"
+    fwupdmgr refresh && fwupdmgr get-updates || true
+
+    echo -e "\n\033[32mUpdate sequence complete!\033[0m"
+
