@@ -165,7 +165,6 @@ modules:
         - xdg-utils # think already in base-main
         - gtk4-layer-shell
         - network-manager-applet
-        - waypaper
         # hyprpicker: not in Fedora repos — add via script if needed
         - libappindicator-gtk3
         # nirius: built from source via build-nirius.sh (Terra is behind upstream)
@@ -174,6 +173,16 @@ modules:
         - pamixer # CLI volume control for Waybar scroll/click actions
         # swayosd: built from source via build-swayosd.sh
         # dex: not in Fedora repos — XDG Autostart launcher, add via script if needed
+
+  # ── Waypaper (solopasha/hyprland COPR) ───────────────────────────────────
+  - type: dnf
+    repos:
+      copr:
+        - solopasha/hyprland
+    install:
+      install-weak-deps: false
+      packages:
+        - waypaper
 
   # ── Display manager ───────────────────────────────────────────────────────
   - type: dnf
