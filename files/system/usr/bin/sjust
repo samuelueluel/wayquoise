@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+export JUST_UNSORTED=true
+exec just --justfile /usr/share/wayquoise/justfile --working-directory "$HOME" "$@"
