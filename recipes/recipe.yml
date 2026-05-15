@@ -331,7 +331,7 @@ modules:
         - gstreamer1-plugins-good # think already in base-main
         - gstreamer1-plugins-bad-free # think already in base-main
         - gstreamer1-plugins-ugly
-        - libdvdcss # from RPM Fusion nonfree-tainted
+        - libdvdcss # from RPM Fusion free-tainted
         - libopenraw
         - libgsf # think already in base-main
         - poppler-glib # think already in base-main
