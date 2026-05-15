@@ -87,14 +87,10 @@ zen:
         xdg-mime default zen-utility.desktop "$mime" 2>/dev/null || true
     done
 
-# Deploy dotfiles from image snapshot, init chezmoi, apply (before brew)
+# Init chezmoi from ~/dotfiles and apply (before brew)
 chezmoi:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ ! -d "$HOME/dotfiles/.git" ]]; then
-        echo "Populating ~/dotfiles from image snapshot..."
-        rsync -a {{SHARE}}/dotfiles/ "$HOME/dotfiles/"
-    fi
     chezmoi init --source="$HOME/dotfiles"
     chezmoi apply --force
     systemctl --user enable empty-trash.service || true
